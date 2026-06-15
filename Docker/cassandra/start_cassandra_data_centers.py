@@ -25,33 +25,69 @@ def wait_for_log(container, log_pattern, timeout=300):
             debug(f"Log pattern '{log_pattern}' found in container '{container.name}'.")
             return True
         if time.time() - start_time > timeout:
-            debug(f"Timeout waiting for log pattern '{log_pattern}' in container '{container.name}'.")
+            print(f"Timeout ({timeout}s) waiting for '{log_pattern}' in container '{container.name}'. Last logs:")
+            for line in container.logs().decode('utf-8', errors='replace').splitlines()[-30:]:
+                print(f"  {line}")
             return False
+    # Stream ended — container exited before the pattern appeared
+    container.reload()
+    print(f"Container '{container.name}' exited (status={container.status}) before '{log_pattern}' appeared. Last logs:")
+    for line in container.logs().decode('utf-8', errors='replace').splitlines()[-30:]:
+        print(f"  {line}")
     return False
 
 def create_cassandra_cluster(num_nodes, cassandra_image):
     client = docker.from_env()
     network_name = config["network_name"]
 
+    # Remove any leftover containers from a previous run
+    for i in range(1, num_nodes+1):
+        cname = f'{config["node_name"]}{i}'
+        try:
+            client.containers.get(cname).remove(force=True)
+            debug(f"Removed existing container '{cname}'")
+        except docker.errors.NotFound:
+            pass
+
     # Determine resource limits from gcp.csv if machine type is specified
     nano_cpus = None
     mem_limit = None
-    cassandra_xmx = "4g"  # default fallback
+    cassandra_xmx = None
+    cassandra_xms = None
+    active_processor_count = str(max(1, (os.cpu_count() or 1) // num_nodes))
     machine = config.get("machine", "")
     ephemeral_read_enabled = config.get("accord.ephemeral_read_enabled", "true")
+
+    actual_mem_gb = 0
+    try:
+        with open('/proc/meminfo') as f:
+            for line in f:
+                if line.startswith('MemTotal:'):
+                    actual_mem_gb = int(line.split()[1]) / 1048576
+                    break
+    except Exception:
+        pass
+
     if machine:
         try:
             with open(os.path.join(os.path.dirname(__file__), '..', 'gcp.csv'), 'r') as gcp_file:
                 gcp_reader = csv.DictReader(gcp_file)
                 for gcp_row in gcp_reader:
                     if gcp_row['name'] == machine:
-                        nano_cpus = int(float(gcp_row['vcpus']) * 1e9)
                         memory_gb = float(gcp_row['memory'])
-                        mem_limit = int(memory_gb * 1024 * 1024 * 1024 * 4/5) # need some headroom
-                        cassandra_xmx = f"{math.floor(memory_gb)}g"
+                        if actual_mem_gb == 0 or memory_gb <= actual_mem_gb:
+                            nano_cpus = int(float(gcp_row['vcpus']) * 1e9)
+                            mem_limit = int(memory_gb * 1024 * 1024 * 1024 * 4/5) # need some headroom
+                            cassandra_xmx = f"{math.floor(memory_gb)}g"
+                            cassandra_xms = "2g"
+                            active_processor_count = gcp_row['vcpus']
                         break
         except FileNotFoundError:
             debug(f"gcp.csv not found, no resource limits applied for machine '{machine}'")
+
+    if cassandra_xmx is None:
+        cassandra_xmx = "4g"
+        cassandra_xms = "2g"
     
     # Start the Cassandra nodes
     containers = []
@@ -64,7 +100,6 @@ def create_cassandra_cluster(num_nodes, cassandra_image):
                 image=cassandra_image,
                 name=container_name,
                 network=network_name,
-                auto_remove=True,
                 security_opt=[
                 "seccomp=unconfined",
                 "apparmor=unconfined",
@@ -79,7 +114,7 @@ def create_cassandra_cluster(num_nodes, cassandra_image):
                 tmpfs={"/tmp/tmpfs": "rw,nosuid,nodev,mode=1777"},
                 ulimits=[docker.types.Ulimit(name="memlock", soft=-1, hard=-1)],
                 environment={
-                    "JVM_OPTS" : " -Xms2g -Xmx"+cassandra_xmx+" -XX:ActiveProcessorCount="+gcp_row['vcpus'],
+                    "JVM_OPTS" : " -Xms"+cassandra_xms+" -Xmx"+cassandra_xmx+" -XX:ActiveProcessorCount="+active_processor_count,
                     "CASSANDRA_ENDPOINT_SNITCH": "GossipingPropertyFileSnitch",
                     "CASSANDRA_SEEDS": f'{config["node_name"]}1' if i > 1 else "",
                     "CASSANDRA_CLUSTER_NAME": "TestCluster",

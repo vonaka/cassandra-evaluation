@@ -2,7 +2,7 @@
 set -e
 
 CONTAINER_ID="${1:?Usage: $0 <container_id_or_name>}"
-JMX_HOST="localhost:9010"
+JMX_HOST="localhost:7199"
 JMXTERM_JAR="/tmp/jmxterm-1.0.4-uber.jar"
 JMXTERM_URL="https://github.com/jiaqi/jmxterm/releases/download/v1.0.4/jmxterm-1.0.4-uber.jar"
 

@@ -302,8 +302,9 @@ compute_test_machine() {
     ' "$gcp_csv")
 
     if [ -z "$machine" ]; then
-        error "No suitable machine spec found in gcp.csv for ${actual_cpus} CPUs and ${actual_mem_gb}GB memory with ${node_count} nodes"
-        return 1
+        log "No suitable machine spec found for ${actual_cpus} CPUs and ${actual_mem_gb}GB memory with ${node_count} nodes; running without resource limits"
+        sed -i "s/^machine=.*/machine=/" "${CONFIG_FILE}"
+        return 0
     fi
 
     log "Test mode: machine spec '${machine}' for ${actual_cpus} CPUs, ${actual_mem_gb}GB memory, ${node_count} nodes"
@@ -317,6 +318,10 @@ pull_images() {
         [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]] && continue
         [[ "$key" =~ _image$ ]] || continue
         value=$(echo "$value" | xargs)
+        if docker image inspect "${value}" >/dev/null 2>&1; then
+            log "Image '${value}' already present locally, skipping pull."
+            continue
+        fi
         log "Pulling image: ${value}"
         docker pull "${value}"
         if [ $? -ne 0 ]; then
